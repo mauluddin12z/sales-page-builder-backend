@@ -4,222 +4,217 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
-use Gemini;
+use App\Services\Ai\GeminiAiService;
+use Illuminate\Http\JsonResponse;
 
 class AiController extends Controller
 {
-    protected $client;
+    public function __construct(
+        protected GeminiAiService $ai
+    ) {}
 
-    public function __construct()
+    /**
+     * FULL GENERATION
+     */
+    public function generate(Request $request): JsonResponse
     {
-        $apiKey = env('GEMINI_API_KEY');
-        $this->client = Gemini::client($apiKey);
+        $data = $this->validateInput($request);
+
+        return $this->handleAiRequest(
+            fn() => $this->buildFullPrompt($data),
+            null
+        );
     }
 
     /**
-     * FULL generation
+     * PARTIAL REGENERATION
      */
-    public function generate(Request $request)
+    public function regenerate(Request $request): JsonResponse
     {
-        $validated = $this->validateInput($request);
-        $model = env('GEMINI_MODEL');
-        try {
-            $prompt = $this->buildFullPrompt($validated);
-
-            // DEBUG MODE: return prompt only
-            if (env('AI_DEBUG_PROMPT', false)) {
-                return response()->json([
-                    'success' => true,
-                    'debug' => true,
-                    'prompt' => $prompt,
-                ]);
-            }
-
-            // MOCK MODE: no Gemini usage
-            if (env('AI_MOCK', false)) {
-                return response()->json([
-                    'success' => true,
-                    'mock' => true,
-                    'text' => [
-                        "headline" => "Mock Headline: {$validated['product_name']}",
-                        "subheadline" => "Mock Subheadline for testing",
-                        "description" => "This is a mocked description for development purposes.",
-                        "benefits" => ["Mock benefit 1", "Mock benefit 2"],
-                        "features" => $validated['features'] ?? [],
-                        "social_proof" => "Mock testimonial: users love it",
-                        "pricing" => $validated['price'] ?? "N/A",
-                        "cta" => "Buy Now (Mock)"
-                    ]
-                ]);
-            }
-
-            // REAL GEMINI CALL
-            $result = $this->client
-                ->generativeModel(model: $model)
-                ->generateContent($prompt);
-
-            return response()->json([
-                'success' => true,
-                'text' => $result->text(),
-            ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'AI Generation failed',
-                'error' => $e->getMessage()
-            ], 500);
-        }
-    }
-
-    /**
-     * PARTIAL regeneration (single field)
-     * Example: description, headline, cta, etc.
-     */
-    public function regenerate(Request $request)
-    {
-        $model = env('GEMINI_MODEL');
-        $validated = $this->validateInput($request);
-
-        $request->validate([
+        $validated = $request->validate([
             'field' => 'required|string|in:headline,subheadline,description,benefits,features,social_proof,pricing,cta',
-            'current_output' => 'required|array'
+            'current_output' => 'required',
+            'product_name' => 'required|string',
+            'description' => 'required|string',
+            'target_audience' => 'required|string',
+            'features' => 'nullable|array',
+            'price' => 'nullable|string',
+            'usp' => 'nullable|string',
         ]);
 
+        $current = $this->parseCurrentOutput($validated['current_output']);
+        $field = $validated['field'];
+
+        if (!array_key_exists($field, $current)) {
+            return $this->error("Field '{$field}' not found", 422);
+        }
+
+        return $this->handleAiRequest(
+            fn() => $this->buildRegenerationPrompt($validated, $field, $current),
+            $field
+        );
+    }
+
+    /**
+     * CENTRAL AI HANDLER (CLEAN)
+     */
+    private function handleAiRequest(callable $promptBuilder, ?string $requiredKey): JsonResponse
+    {
         try {
-            $prompt = $this->buildRegenerationPrompt(
-                $validated,
-                $request->field,
-                $request->current_output
-            );
+            $prompt = $promptBuilder();
 
-            // DEBUG MODE
-            if (env('AI_DEBUG_PROMPT', false)) {
-                return response()->json([
-                    'success' => true,
-                    'debug' => true,
-                    'prompt' => $prompt,
-                ]);
+            $response = $this->ai->generate($prompt);
+
+            $clean = $this->cleanJson($response['text'] ?? '');
+            $data = $this->decodeJson($clean);
+
+            if ($requiredKey && !array_key_exists($requiredKey, $data)) {
+                return $this->error('AI missing required field', 500);
             }
 
-            // MOCK MODE (simulate edited field only)
-            if (env('AI_MOCK', false)) {
-                $mock = $request->current_output;
-                $mock[$request->field] = "MOCK UPDATED: {$request->field} content";
-
-                return response()->json([
-                    'success' => true,
-                    'mock' => true,
-                    'text' => $mock
-                ]);
-            }
-
-            //  REAL GEMINI CALL
-            $result = $this->client
-                ->generativeModel(model: $model)
-                ->generateContent($prompt);
-
-            return response()->json([
-                'success' => true,
-                'text' => $result->text(),
+            return $this->success([
+                'data' => $data,
+                'meta' => [
+                    'model' => $response['model_used'] ?? null,
+                    'key' => $response['api_key_index'] ?? null,
+                ]
             ]);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'AI Regeneration failed',
-                'error' => $e->getMessage()
-            ], 500);
+        } catch (\Throwable $e) {
+            return $this->error('AI request failed', 503);
         }
     }
 
     /**
-     * Shared validation
+     * CLEAN JSON
      */
-    private function validateInput($request)
+    private function cleanJson(string $text): string
+    {
+        return trim(preg_replace('/```json|```/i', '', $text));
+    }
+
+    /**
+     * SAFE JSON DECODE
+     */
+    private function decodeJson(string $text): array
+    {
+        $decoded = json_decode($text, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \Exception("Invalid JSON from AI");
+        }
+
+        return $decoded;
+    }
+
+    /**
+     * VALIDATION
+     */
+    private function validateInput(Request $request): array
     {
         return $request->validate([
-            'product_name'     => 'required|string',
-            'description'      => 'required|string',
-            'target_audience'  => 'required|string',
-            'features'         => 'nullable|array',
-            'price'            => 'nullable|string',
-            'usp'              => 'nullable|string',
+            'product_name' => 'required|string',
+            'description' => 'required|string',
+            'target_audience' => 'required|string',
+            'features' => 'nullable|array',
+            'price' => 'nullable|string',
+            'usp' => 'nullable|string',
         ]);
     }
 
     /**
-     * FULL generation prompt
+     * PARSE CURRENT OUTPUT
      */
-    private function buildFullPrompt($data): string
+    private function parseCurrentOutput($input): array
     {
-        $features = json_encode($data['features'] ?? []);
+        if (is_array($input)) return $input;
 
-        return "
-You are a world-class direct-response copywriter.
+        $decoded = json_decode($input, true);
 
-Return ONLY valid JSON. No markdown. No explanations.
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($decoded)) {
+            abort(response()->json([
+                'success' => false,
+                'message' => 'Invalid current_output JSON',
+            ], 422));
+        }
 
-Schema:
-{
-  \"headline\": \"string\",
-  \"subheadline\": \"string\",
-  \"description\": \"string\",
-  \"benefits\": [\"string\"],
-  \"features\": [\"string\"],
-  \"social_proof\": \"string\",
-  \"pricing\": \"string\",
-  \"cta\": \"string\"
-}
-
-Rules:
-- Valid JSON only
-- All fields required
-- Conversion-focused copy
-
-Product Info:
-Name: {$data['product_name']}
-Description: {$data['description']}
-Target audience: {$data['target_audience']}
-Features: {$features}
-Price: {$data['price']}
-USP: {$data['usp']}
-";
+        return $decoded;
     }
 
     /**
-     * FIELD-LEVEL regeneration prompt
+     * FULL PROMPT
      */
-    private function buildRegenerationPrompt($data, $field, $current): string
+    private function buildFullPrompt(array $data): string
     {
-        $features = json_encode($data['features'] ?? []);
+        return json_encode([
+            'instruction' => [
+                'role' => 'world-class direct-response copywriter',
+                'rules' => [
+                    'Return ONLY valid JSON',
+                    'Do NOT use markdown',
+                    'Do NOT wrap in backticks'
+                ]
+            ],
+            'output_schema' => [
+                "headline" => "string",
+                "subheadline" => "string",
+                "description" => "string",
+                "benefits" => ["string"],
+                "features" => ["string"],
+                "social_proof" => "string",
+                "pricing" => "string",
+                "cta" => "string"
+            ],
+            'input' => $data
+        ], JSON_UNESCAPED_UNICODE);
+    }
 
-        $currentJson = json_encode($current, JSON_PRETTY_PRINT);
+    /**
+     * REGEN PROMPT
+     */
+    private function buildRegenerationPrompt(array $data, string $field, array $current): string
+    {
+        $arrayFields = ['features', 'benefits'];
+        $type = in_array($field, $arrayFields) ? 'array of strings' : 'string';
 
-        return "
-You are an expert direct-response copy editor.
+        return json_encode([
+            'instruction' => [
+                'task' => "Modify ONLY '{$field}'",
+                'rules' => [
+                    'Keep all other fields identical',
+                    'Return ONLY valid JSON',
+                    'No markdown, no backticks'
+                ]
+            ],
+            'expected_type' => $type,
+            'current_output' => $current,
+            'input' => [
+                'product_name' => $data['product_name'],
+                'description' => $data['description'],
+                'target_audience' => $data['target_audience'],
+                'features' => $data['features'] ?? [],
+                'price' => $data['price'] ?? '',
+                'usp' => $data['usp'] ?? '',
+            ]
+        ], JSON_UNESCAPED_UNICODE);
+    }
 
-You MUST modify ONLY ONE FIELD and keep everything else EXACTLY the same.
+    /**
+     * MOCK REMOVED
+     */
 
-Return ONLY valid JSON.
+    /**
+     * RESPONSE HELPERS
+     */
+    private function success(array $data): JsonResponse
+    {
+        return response()->json(['success' => true] + $data);
+    }
 
-CRITICAL RULES:
-- Output must be valid JSON only
-- Do NOT change any field except: {$field}
-- Keep all other values identical
-- No markdown, no explanation, no backticks
-
-CURRENT OUTPUT:
-{$currentJson}
-
-Product Info:
-Name: {$data['product_name']}
-Description: {$data['description']}
-Target audience: {$data['target_audience']}
-Features: {$features}
-Price: {$data['price']}
-USP: {$data['usp']}
-
-TASK:
-Regenerate ONLY the \"{$field}\" field to improve conversion quality.
-";
+    private function error(string $message, int $code): JsonResponse
+    {
+        return response()->json([
+            'success' => false,
+            'message' => $message
+        ], $code);
     }
 }

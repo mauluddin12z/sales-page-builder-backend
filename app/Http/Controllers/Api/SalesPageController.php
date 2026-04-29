@@ -8,9 +8,11 @@ use Illuminate\Http\Request;
 
 class SalesPageController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return SalesPage::latest()->paginate(10);
+        return SalesPage::where('user_id', $request->user()->id)
+            ->latest()
+            ->paginate(10);
     }
 
     public function store(Request $request)
@@ -22,8 +24,10 @@ class SalesPageController extends Controller
             'target_audience' => 'required|string',
             'price' => 'nullable|string',
             'usp' => 'nullable|string',
-            'generated_content' => 'required|string',
-            'template' => 'required|string',
+            'generated_content' => 'nullable|string',
+            'template' => 'nullable|string',
+            'cta_label' => 'nullable|string',
+            'cta_url' => 'nullable|url',
         ]);
 
         $validated['user_id'] = $request->user()->id ?? $request->user_id;
@@ -37,13 +41,21 @@ class SalesPageController extends Controller
         ], 201);
     }
 
-    public function show(SalesPage $salesPage)
+    public function show(Request $request, int $id)
     {
+        $salesPage = SalesPage::where('id', $id)
+            ->where('user_id', $request->user()->id)
+            ->firstOrFail();
+
         return $salesPage;
     }
 
-    public function update(Request $request, SalesPage $salesPage)
+    public function update(Request $request, int $id)
     {
+        $salesPage = SalesPage::where('id', $id)
+            ->where('user_id', $request->user()->id)
+            ->firstOrFail();
+
         $validated = $request->validate([
             'product_name' => 'required|string',
             'description' => 'required|string',
@@ -51,7 +63,10 @@ class SalesPageController extends Controller
             'target_audience' => 'required|string',
             'price' => 'nullable|string',
             'usp' => 'nullable|string',
-            'template' => 'required|string',
+            'generated_content' => 'nullable|string',
+            'template' => 'nullable|string',
+            'cta_label' => 'nullable|string',
+            'cta_url' => 'nullable|url',
         ]);
 
         $salesPage->update($validated);
@@ -62,8 +77,12 @@ class SalesPageController extends Controller
         ]);
     }
 
-    public function destroy(SalesPage $salesPage)
+    public function destroy(Request $request, int $id)
     {
+        $salesPage = SalesPage::where('id', $id)
+            ->where('user_id', $request->user()->id)
+            ->firstOrFail();
+
         $salesPage->delete();
 
         return response()->json([

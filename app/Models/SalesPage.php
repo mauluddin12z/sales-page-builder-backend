@@ -19,6 +19,8 @@ class SalesPage extends Model
         'usp',
         'generated_content',
         'template',
+        'cta_label',
+        'cta_url',
     ];
 
     protected $casts = [
