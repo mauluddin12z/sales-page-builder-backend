@@ -50,7 +50,7 @@ class GeminiAiService
                     ];
                 } catch (\Exception $e) {
 
-                    $msg = "quota";
+                    $msg = strtolower($e->getMessage());
 
                     /**
                      * CASE 1: QUOTA / TOKEN LIMIT → switch API KEY
