@@ -2,219 +2,108 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
-use App\Services\Ai\GeminiAiService;
+use Throwable;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
+use App\Services\Ai\AiManager;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\GenerateLandingPageRequest;
+use App\Http\Requests\RegenerateLandingPageRequest;
+use App\Services\Ai\Prompts\LandingPagePromptBuilder;
 
 class AiController extends Controller
 {
-    public function __construct(
-        protected GeminiAiService $ai
-    ) {}
+    /*
+    |--------------------------------------------------------------------------
+    | Generate Full Landing Page
+    |--------------------------------------------------------------------------
+    */
 
-    /**
-     * FULL GENERATION
-     */
-    public function generate(Request $request): JsonResponse
-    {
-        $data = $this->validateInput($request);
+    public function generate(
+        GenerateLandingPageRequest $request,
+        AiManager $ai,
+    ): JsonResponse {
 
-        return $this->handleAiRequest(
-            fn() => $this->buildFullPrompt($data),
-            null
-        );
-    }
-
-    /**
-     * PARTIAL REGENERATION
-     */
-    public function regenerate(Request $request): JsonResponse
-    {
-        $validated = $request->validate([
-            'field' => 'required|string|in:headline,subheadline,description,benefits,features,social_proof,pricing,cta',
-            'current_output' => 'required',
-            'product_name' => 'required|string',
-            'description' => 'required|string',
-            'target_audience' => 'required|string',
-            'features' => 'nullable|array',
-            'price' => 'nullable|string',
-            'usp' => 'nullable|string',
-        ]);
-
-        $current = $this->parseCurrentOutput($validated['current_output']);
-        $field = $validated['field'];
-
-        if (!array_key_exists($field, $current)) {
-            return $this->error("Field '{$field}' not found", 422);
-        }
-
-        return $this->handleAiRequest(
-            fn() => $this->buildRegenerationPrompt($validated, $field, $current),
-            $field
-        );
-    }
-
-    /**
-     * CENTRAL AI HANDLER (CLEAN)
-     */
-    private function handleAiRequest(callable $promptBuilder, ?string $requiredKey): JsonResponse
-    {
         try {
-            $prompt = $promptBuilder();
 
-            $response = $this->ai->generate($prompt);
+            $prompt = LandingPagePromptBuilder::full(
+                $request->validated()
+            );
 
-            $clean = $this->cleanJson($response['text'] ?? '');
-            $data = $this->decodeJson($clean);
+            $result = $ai->generate($prompt);
 
-            if ($requiredKey && !array_key_exists($requiredKey, $data)) {
-                return $this->error('AI missing required field', 500);
-            }
+            return response()->json([
 
-            return $this->success([
-                'data' => $data,
-                'meta' => [
-                    'model' => $response['model_used'] ?? null,
-                    'key' => $response['api_key_index'] ?? null,
-                ]
+                'success' => true,
+
+                'data' => $result,
+
             ]);
-        } catch (\Throwable $e) {
-            return $this->error('AI request failed', 503);
-        }
-    }
 
-    /**
-     * CLEAN JSON
-     */
-    private function cleanJson(string $text): string
-    {
-        return trim(preg_replace('/```json|```/i', '', $text));
-    }
+        } catch (Throwable $e) {
 
-    /**
-     * SAFE JSON DECODE
-     */
-    private function decodeJson(string $text): array
-    {
-        $decoded = json_decode($text, true);
+            Log::error('AI generate failed', [
 
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new \Exception("Invalid JSON from AI");
-        }
+                'error' => $e->getMessage(),
 
-        return $decoded;
-    }
+            ]);
 
-    /**
-     * VALIDATION
-     */
-    private function validateInput(Request $request): array
-    {
-        return $request->validate([
-            'product_name' => 'required|string',
-            'description' => 'required|string',
-            'target_audience' => 'required|string',
-            'features' => 'nullable|array',
-            'price' => 'nullable|string',
-            'usp' => 'nullable|string',
-        ]);
-    }
+            return response()->json([
 
-    /**
-     * PARSE CURRENT OUTPUT
-     */
-    private function parseCurrentOutput($input): array
-    {
-        if (is_array($input)) return $input;
-
-        $decoded = json_decode($input, true);
-
-        if (json_last_error() !== JSON_ERROR_NONE || !is_array($decoded)) {
-            abort(response()->json([
                 'success' => false,
-                'message' => 'Invalid current_output JSON',
-            ], 422));
+
+                'message' => 'AI generation failed',
+
+            ], 500);
         }
-
-        return $decoded;
     }
 
-    /**
-     * FULL PROMPT
-     */
-    private function buildFullPrompt(array $data): string
-    {
-        return json_encode([
-            'instruction' => [
-                'role' => 'world-class direct-response copywriter',
-                'rules' => [
-                    'Return ONLY valid JSON',
-                    'Do NOT use markdown',
-                    'Do NOT wrap in backticks'
-                ]
-            ],
-            'output_schema' => [
-                "headline" => "string",
-                "subheadline" => "string",
-                "description" => "string",
-                "benefits" => ["string"],
-                "features" => ["string"],
-                "social_proof" => "string",
-                "pricing" => "string",
-                "cta" => "string"
-            ],
-            'input' => $data
-        ], JSON_UNESCAPED_UNICODE);
-    }
+    /*
+    |--------------------------------------------------------------------------
+    | Regenerate Specific Field
+    |--------------------------------------------------------------------------
+    */
 
-    /**
-     * REGEN PROMPT
-     */
-    private function buildRegenerationPrompt(array $data, string $field, array $current): string
-    {
-        $arrayFields = ['features', 'benefits'];
-        $type = in_array($field, $arrayFields) ? 'array of strings' : 'string';
+    public function regenerate(
+        RegenerateLandingPageRequest $request,
+        AiManager $ai,
+    ): JsonResponse {
 
-        return json_encode([
-            'instruction' => [
-                'task' => "Modify ONLY '{$field}'",
-                'rules' => [
-                    'Keep all other fields identical',
-                    'Return ONLY valid JSON',
-                    'No markdown, no backticks'
-                ]
-            ],
-            'expected_type' => $type,
-            'current_output' => $current,
-            'input' => [
-                'product_name' => $data['product_name'],
-                'description' => $data['description'],
-                'target_audience' => $data['target_audience'],
-                'features' => $data['features'] ?? [],
-                'price' => $data['price'] ?? '',
-                'usp' => $data['usp'] ?? '',
-            ]
-        ], JSON_UNESCAPED_UNICODE);
-    }
+        try {
 
-    /**
-     * MOCK REMOVED
-     */
+            $validated = $request->validated();
 
-    /**
-     * RESPONSE HELPERS
-     */
-    private function success(array $data): JsonResponse
-    {
-        return response()->json(['success' => true] + $data);
-    }
+            $prompt = LandingPagePromptBuilder::regenerate(
+                input: $validated,
+                field: $validated['field'],
+                current: $validated['current_output'],
+            );
 
-    private function error(string $message, int $code): JsonResponse
-    {
-        return response()->json([
-            'success' => false,
-            'message' => $message
-        ], $code);
+            $result = $ai->generate($prompt);
+
+            return response()->json([
+
+                'success' => true,
+
+                'data' => $result,
+
+            ]);
+
+        } catch (Throwable $e) {
+
+            Log::error('AI regenerate failed', [
+
+                'error' => $e->getMessage(),
+
+            ]);
+
+            return response()->json([
+
+                'success' => false,
+
+                'message' => 'AI regeneration failed',
+
+            ], 500);
+        }
     }
 }
