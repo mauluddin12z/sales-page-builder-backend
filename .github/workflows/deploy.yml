@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -19,27 +19,42 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           script: |
             bash -lc '
+              set -e
 
-              cd /home/hidayatmauluddin/sales-page-builder/backend
+              APP_NAME="${{ github.event.repository.name }}"
+              APP_DIR="/var/www/apps/$APP_NAME"
 
-              # Pull latest code
+              echo "Deploying Laravel app: $APP_NAME"
+
+              mkdir -p /var/www/apps
+
+              # Clone if not exists
+              if [ ! -d "$APP_DIR/.git" ]; then
+                git clone git@github.com:${{ github.repository }}.git "$APP_DIR"
+              fi
+
+              cd "$APP_DIR"
+
+              echo "Syncing code..."
               git fetch origin
               git reset --hard origin/main
               git clean -fd
 
-              # Install PHP dependencies
+              echo "Installing PHP dependencies..."
               composer install --no-dev --optimize-autoloader
 
-              # Run Laravel optimizations
+              echo "Running Laravel migrations..."
               php artisan migrate --force
+
+              echo "Clearing old cache..."
+              php artisan optimize:clear
+
+              echo "Caching configuration..."
               php artisan config:cache
               php artisan route:cache
               php artisan view:cache
 
-              # Clear old cache (important in deployments)
-              php artisan optimize:clear
-
-              # Fix permissions (VERY IMPORTANT on VPS)
+              echo "Fixing permissions..."
               sudo chown -R www-data:www-data storage bootstrap/cache
               sudo chmod -R 775 storage bootstrap/cache
 
